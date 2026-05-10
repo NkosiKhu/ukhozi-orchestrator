@@ -1,11 +1,11 @@
 import asyncio
-from typing import Any
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from script import run_demo_script
+from logger import SimulationEventLogger
+from scenarios import SCENARIOS, summarize_payload
 
 app = FastAPI(title="Simulation Orchestrator")
+ACTIVE_SCENARIO = "pyromaniac"
 
 
 @app.get("/health")
@@ -18,27 +18,27 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     print("[orchestrator] browser connected")
 
-    demo_task: asyncio.Task[None] | None = None
+    scenario = SCENARIOS[ACTIVE_SCENARIO]()
+    logger = SimulationEventLogger(ACTIVE_SCENARIO)
+    await logger.start()
 
     try:
         while True:
             payload = await websocket.receive_json()
-            print("[orchestrator:inbound]", payload)
+            print("[orchestrator:inbound]", summarize_payload(payload))
+
+            if payload.get("kind") == "score_update":
+                logger.handle_score_update(payload.get("update") or {})
+                continue
 
             if payload.get("kind") != "simulation_event":
                 continue
 
             event = payload.get("event", {})
-            event_type = event.get("type")
-            if event_type == "simulation_ready" and demo_task is None:
-                start = event.get("suggestedSpawn") or {"lat": 0, "lng": 0, "alt": 100}
-                demo_task = asyncio.create_task(run_demo_script(websocket, start))
+            logger.handle_event(event)
+            await scenario.handle_event(websocket, event)
     except WebSocketDisconnect:
         print("[orchestrator] browser disconnected")
     finally:
-        if demo_task is not None:
-            demo_task.cancel()
-            try:
-                await demo_task
-            except asyncio.CancelledError:
-                pass
+        await logger.close()
+        await scenario.dispose()
